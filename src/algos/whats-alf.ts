@@ -1,31 +1,51 @@
-import { QueryParams } from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
+// src/algos/game-creators-hot.ts
+import { InvalidRequestError } from '@atproto/xrpc-server'
+import {
+  QueryParams,
+  OutputSchema as AlgoOutput,
+} from '../lexicon/types/app/bsky/feed/getFeedSkeleton'
 import { AppContext } from '../config'
 
-// max 15 chars
-export const shortname = 'whats-alf'
+export const shortname = 'game-creators-hot'
 
-export const handler = async (ctx: AppContext, params: QueryParams) => {
+type Handler = (ctx: AppContext, params: QueryParams) => Promise<AlgoOutput>
+
+export const handler: Handler = async (ctx, params) => {
+  const limit = Math.min(params.limit ?? 50, 100)
+
   let builder = ctx.db
     .selectFrom('post')
     .selectAll()
+    .where('gameScore', '>', 0)
+    // ゲームスコア → 新しさ → CID でソート
+    .orderBy('gameScore', 'desc')
     .orderBy('indexedAt', 'desc')
     .orderBy('cid', 'desc')
-    .limit(params.limit)
+    .limit(limit)
 
+  // 簡易版: cursor があれば "indexedAt::cid" として扱う
   if (params.cursor) {
-    const timeStr = new Date(parseInt(params.cursor, 10)).toISOString()
-    builder = builder.where('post.indexedAt', '<', timeStr)
-  }
-  const res = await builder.execute()
+    const [indexedAtMillis, cid] = params.cursor.split('::')
+    if (!indexedAtMillis || !cid) {
+      throw new InvalidRequestError('malformed cursor')
+    }
+    const timeStr = new Date(parseInt(indexedAtMillis, 10)).toISOString()
 
-  const feed = res.map((row) => ({
+    builder = builder
+      .where('indexedAt', '<', timeStr)
+      .where('cid', '<', cid)
+  }
+
+  const rows = await builder.execute()
+
+  const feed = rows.map((row) => ({
     post: row.uri,
   }))
 
   let cursor: string | undefined
-  const last = res.at(-1)
+  const last = rows.at(-1)
   if (last) {
-    cursor = new Date(last.indexedAt).getTime().toString(10)
+    cursor = `${new Date(last.indexedAt).getTime()}::${last.cid}`
   }
 
   return {
